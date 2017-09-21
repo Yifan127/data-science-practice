@@ -1,0 +1,285 @@
+---
+title: "Parallel Computing"
+author:
+- "Yifan Zhang (4947058)"
+output: 
+  html_document:
+    highlight: pygments
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Question 1
+
+The following block is to source the setup code for this lab, and we test the function **`fileStats()`** on the first CSV file.
+
+```{r setup code}
+source("parallel-computing-lab-setup.R")
+fileStats(fileSizes[1, 2])
+```
+
+The goal of the first question is to compare the speed and the answer between serial and parallel processing. In the serial processing part, we use the **`lapply()`** to apply the function **`fileStats()`** on each of the first 1000 CSV files. It returns a list object with length 1000. Also, we use **`system.time()`** to get how much cpu and real time the serial process has already taken.
+
+```{r serial}
+# serial
+files <- head(fileSizes, 1000)
+serial.time <- system.time(serial <- lapply(files$V2, fileStats))
+class(serial)
+```
+
+```{r}
+length(serial)
+```
+
+```{r}
+print(serial.time)
+```
+
+Then, we use **`detectCores()`** in the **parallel** package to detect the number of cores in the Linux virtual machine, and the result shows that there are 20 cores in the VM. After that, we use **`mclapply()`** to run the function **`fileStats()`** on all of the 20 cores in parallel at once. The slave R sessions can recognize the **`fileStats()`** function because of the forked R sessions, so the variables and functions are shared between these sessions. Similar to the serial processing, it also returns a list object with length 1000. To compare the answers, we use **`identical()`** to test whether the whole outputs are equal, and it returns TRUE, which means that the two objects are exactly the same. Furthermore, we notice that the **user** time exceeds the **elapsed** time, and that is the sign of working in parallel. 
+
+```{r parallel}
+library(parallel)
+# detect cores
+numCores <- detectCores()
+print(numCores)
+```
+
+```{r}
+# run in parallel
+par.time <- system.time(parallel <- mclapply(files$V2, fileStats, mc.cores = numCores))
+class(parallel)
+```
+
+```{r}
+length(parallel)
+```
+
+```{r}
+print(par.time)
+```
+
+```{r}
+# check whether the answers are the same
+identical(serial, parallel)
+```
+
+```{r comparing time}
+# Times faster
+serial.time[3]/par.time[3]
+```
+
+From the user cpu and real time, we can see that parallel processing is much faster than serial processing. However, the **`mclapply()`** approach is not 20 times faster than the **`lapply()`**. There are two main reasons for this result. First, there is overhead in starting up slave R sessions. Second, there is some communication overhead between the master and slave sessions, because these slave sessions need to send the results back to the master after executing the function.
+
+## Question 2
+
+In this question, we use the parallel approach **`mclapply()`** to apply the function **`fileStats()`** on the full set of CSV files, and then measure and save the time used by this approach for further comparison.
+
+```{r allcsvs}
+# calculate time for the full set of CSV files using parallel processing
+ptm.old <- proc.time()
+allfiles <- mclapply(fileSizes$V2, fileStats, mc.cores = numCores)
+ptm.mc <- proc.time() - ptm.old
+print(ptm.mc)
+```
+
+To calculate the average arrival delay by agency, we first convert the list to a data frame, and then use **aggregation()** to get the sum of arrival delays and the sum of count of arrival delays by agency name. Finally, we get the result by dividing the two numbers. Also, we exclude the agencies whose arrival delay is `NaN`, which means the agency has no arrival delays.
+
+```{r arrival by agency}
+# calculate average arrival by agency
+df <- do.call(rbind, allfiles)
+df <- aggregate(df, by = list(rownames(df)), sum)
+arrival <- data.frame(arrival = df$agencySums / df$agencyDenoms)
+rownames(arrival) <- df$Group.1
+arrival <- arrival[!is.nan(arrival[,1]), , drop = FALSE]
+print(arrival)
+```
+
+## Question 3
+
+The size of some of the CSV files are larger than others, therefore, the tasks take quite dissimilar amounts of computation time. In order to balance the workload among all the sessions, we rearrange the files by their sizes in decreasing order, in this way, R will run the larger files first. In addition, we use load balancing by setting **`mc.preschedule = FALSE`**, so R will allocates these tasks to the slave sessions dynamically. 
+
+```{r load balancing mclapply}
+# reaggrange the files by size in decreasing order
+orderedFiles <- fileSizes[order(fileSizes$V1, decreasing = TRUE), ]
+ptm.old <- proc.time()
+# disable preschedule
+allfilesLB <- mclapply(orderedFiles$V2, fileStats, 
+                      mc.cores = numCores, mc.preschedule = FALSE)
+ptm.lb <- proc.time() - ptm.old
+print(ptm.lb)
+```
+
+The result clearly indicates that load balancing does not reduce the time taken to perform the parallel computations on this data set. To investigate the reason, we enable the preschedule again, so the data is divided into 20 sections and passed to 20 processes.
+
+```{r ordered mclapply}
+ptm.old <- proc.time()
+allfilesOrder <- mclapply(orderedFiles$V2, fileStats, mc.cores = numCores)
+proc.time() - ptm.old
+```
+
+From the result we can observe that the standard approach with **`mc.preschedule = TRUE`** runs faster than the load balancing approach. We will discuss this result further at the end of the report.
+
+## Question 4
+
+For the last question, we aim at running the function **`fileStats()`** on multiple virtual machines with more cores via **`makeCluster()`**. Before executing the code, we need to set up automatic authentication, which can be achieved using the following steps:
+
+First, we take the virtual machine `stats769prd02` as our master machine, and run **`ssh-keygen`** to generate key with empty passphrase. This step generates two files under the **`.ssh`** folder in user home directory.
+
+```{r, engine = 'bash', eval = FALSE}
+ssh-keygen
+Generating public/private rsa key pair.
+Enter file in which to save the key (/home/yzha496/.ssh/id_rsa):
+  Created directory '/home/yzha496/.ssh'.
+Enter passphrase (empty for no passphrase):
+  Enter same passphrase again:
+  Your identification has been saved in /home/yzha496/.ssh/id_rsa.
+Your public key has been saved in /home/yzha496/.ssh/id_rsa.pub.
+The key fingerprint is:
+  aa:1d:ca:8a:40:30:0d:c6:81:73:d7:8e:62:26:6f:ad yzha496@stats769prd02
+The key's randomart image is:
++--[ RSA 2048]----+
+|+o.  .           |
+|++. . .          |
+|oo.. o           |
+|o.+ . .          |
+| * o    S        |
+|. o .  .         |
+|.. .  o          |
+|..E. + .         |
+|. ..+ .          |
++-----------------+
+```
+
+
+```{r, engine = 'bash', eval = FALSE}
+ls .ssh
+id_rsa  id_rsa.pub
+```
+
+Second, we use **`ssh-copy-id`** to copy the key to the other virtual machines.
+
+```{r, engine = 'bash', eval = FALSE}
+ssh-copy-id stats769prd01.its.auckland.ac.nz
+```
+
+Alternatively, we can use **`scp`** to copy the key to other virtual machines and then use **`nano .ssh/authorized_keys`** to append the public key.
+
+```{r, engine = 'bash', eval = FALSE}
+scp ./.ssh/id_rsa.pub yzha496@stats769prd01.its.auckland.ac.nz:/home/yzha496
+Username accounts log in using your EC Password or Token
+Password:
+id_rsa.pub                                    100%  403     0.4KB/s   00:00
+```
+
+Now, we can use **`ssh`** to login other virtual machines without providing username and password.
+
+```{r, engine = 'bash', eval = FALSE}
+ssh yzha496@stats769prd01.its.auckland.ac.nz
+Username accounts log in using your EC Password or Token
+Last login: Fri Sep  8 10:59:08 2017 from 172.23.76.132
+
+##############################################################################
+# Server   = stats769prd01 : Ubuntu 14.04 amd64 3.13.0-92-generic
+# VMTools  = unknown
+# Memory   = 196.79 GiB (Swap 1.86 GiB)
+# CPUs     = 20 VMware Virtual Platform
+# Puppet last ran against environment production
+##############################################################################
+```
+
+Also, we need to copy the `parallel-computing-lab-setup.R` R script to the other virtual machines, because they don't share the same file system.
+
+```{r, engine = 'bash', eval = FALSE}
+system("scp parallel-computing-lab-setup.R 
+yzha496@stats769prd01.its.auckland.ac.nz:./Lab5/parallel-computing-lab-setup.R")
+```
+
+To execute the code in parallel across multiple virtual machines, we use **`makeCluster`** to create 20 sessions on each of stats769prd01 and stats769prd02. Note that we also try to add stats769prd03 to the cluster, but the connection to this virtual machine is not stable, so we only use 2 virtual machines with 40 cores. Additionally, we use **`clusterEvalQ`** to load packages, variables and functions on each cluster node, because they are independent and communicate via sockets. At last, we use **`stopCluster`** to shutdown the cluster after completing the job. If it is not stopped, the processes continue to run in the background and consume resources, so new processes might be delayed. Moreover, we include the time to create and stop the cluster, as well as the loading the setup R script when timing this approach, because it is unfair if we just time the **`makeCluster`** or the **`parLapply`** call. The result indicates that it runs slower than the **`mclapply`** approach.
+
+```{r clusterApply}
+# run on 2 VMs with 40 cores in parallel
+ptm.old <- proc.time()
+# create cluster
+invisible(cluster <- makeCluster(rep(c("stats769prd01.its.auckland.ac.nz", 
+                                       "stats769prd02.its.auckland.ac.nz"), each = 20),
+                                 master = "stats769prd02.its.auckland.ac.nz",
+                                 user = "yzha496",
+                                 homogeneous = FALSE,
+                                 Rscript = "/usr/bin/Rscript"))
+# load the R script on each cluster node
+invisible(clusterEvalQ(cluster, source("./Lab5/parallel-computing-lab-setup.R")))
+allfilesCL <- clusterApply(cluster, fileSizes$V2, fileStats)
+# shutdown cluster
+stopCluster(cluster)
+ptm.cl <- proc.time() - ptm.old
+print(ptm.cl)
+```
+
+Then, we also try the **`parLapply`** approach. The result shows that the speed is faster than the **`clusterApply`**, and very close to the **`mclapply`** approach.
+
+```{r parLapply}
+ptm.old <- proc.time()
+# create cluster
+invisible(cluster <- makeCluster(rep(c("stats769prd01.its.auckland.ac.nz", 
+                                       "stats769prd02.its.auckland.ac.nz"), each = 20),
+                                 master = "stats769prd02.its.auckland.ac.nz",
+                                 user = "yzha496",
+                                 homogeneous = FALSE,
+                                 Rscript = "/usr/bin/Rscript"))
+# load the R script on each cluster node
+invisible(clusterEvalQ(cluster, source("./Lab5/parallel-computing-lab-setup.R")))
+allfilesParL <- parLapply(cluster, fileSizes$V2, fileStats)
+# shutdown cluster
+stopCluster(cluster)
+ptm.par <- proc.time() - ptm.old
+print(ptm.par)
+```
+
+## Comparison and Discussion
+
+```{r organize data}
+# organize data into data frame
+method <- c("mclapply", "Load Balancing", "clusterApply", "parLapply")
+time <- data.frame(method = method,
+                  elapsed = c(ptm.mc[3], ptm.lb[3], ptm.cl[3], ptm.par[3]))
+time$method <- factor(time$method, levels = method)
+```
+
+```{r plot}
+library(ggplot2)
+timePlot = function(df, y, title){
+  ggplot(data = df, aes_string(x = "method", y = y, fill = "method")) +
+    geom_bar(stat = "identity", width = 0.5) +
+    labs(title = title, 
+         x = "Approach", y = "Time (seconds)") +
+    theme_classic()+
+    theme(plot.title = element_text(size = 18, face="bold", hjust = 0.5),
+          axis.title = element_text(size = 12, face="bold"),
+          legend.position="top",
+          legend.title = element_blank())
+}
+
+timePlot(time, "elapsed", "Elapsed Time Comparison")
+```
+
+From the plot above, we can see that the standard **`mclapply()`** and the **`parLapply()`** approaches are faster than the others, and followed by the **`clusterApply()`** approach, and the **load balancing** method is the most inefficient one. 
+
+```{r}
+dim(fileSizes)
+```
+
+For the **load balancing** approach, we think this is because there are too many elements (98973) in the vector `fileSizes$V1`, and 98973 tasks need to be allocated to 20 nodes, so the number of tasks is almost 5000 times the number of nodes. This approach sends tasks one at a time to a node, and the communication overhead is very high. Therefore, we conclude that the standard approach **`mc.preschedule = TRUE`** is better for short computations or vector with large length, and the load balancing approach **`mc.preschedule = FALSE`** is better for jobs that have high variance of computation time and not too many elements in the vector.
+
+The **`clusterApply()`** approach is slower than the standard **`mclapply()`** approach as there are additional communication overhead across the virtual machines. Also, the **`mclapply()`** approach creates new R sessions via forking, which is very fast. By contrast, the **`clusterApply()`** approach need to copy all the data via the sockets. 
+
+Although in both of **`clusterApply()`** and **`parLapply()`**, the nodes need to communicate via the sockets, **`parLapply()`** is still faster than **`clusterApply()`**, because **`clusterApply()`** calls the function `fileStats` on the first node with the first element in `fileSizes$V2`, on the second node with the second element in `fileSizes$V2`, and so on. In the contrary, if we look at the definition of the function **`parLapply()`**, we can see that it is actually a wrapper of function **`clusterApply()`**, and the `splitList(X, length(cl))` will split the tasks into even portions and send them to the nodes, which reduces the overhead of communication.
+
+```{r definition of parLapply}
+parLapply
+```
+
+The speed of the **`parLapply()`** approach is very close to the **`mclapply()`**, but we think the individual running time of the single **`parLapply`** call is faster, and the extra overhead via the sockets slows the overall speed down.
+
+In conclusion, it is not always true that the more cores, the better the performance. We need to choose the approach on a case-by-case basis to prevent decreasing the computation speed.

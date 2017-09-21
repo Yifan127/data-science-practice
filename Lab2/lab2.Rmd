@@ -1,0 +1,200 @@
+---
+title: "Linux Shell"
+author: "Yifan Zhang, ID:4947058"
+output:
+  word_document:
+    fig_caption: yes
+    fig_height: 6
+    fig_width: 9
+  pdf_document: default
+highlight: pygments
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+In this report we aim to use Shell and R to extract and analyze from a larger data set of bus trip updates.
+
+**Q3: Determining the number of files in the BUSDATA directory**
+In shell, we use ls -l to list the files, then pipe the result to wc to count the number of lines in the result. 
+
+```{r, engine = 'bash', eval = FALSE}
+ls /course/AT/BUSDATA | wc -l
+```
+
+98973   
+
+We also tried to execute the command in R.
+
+```{r, engine = 'bash', eval = FALSE}
+system("ls /course/AT/BUSDATA | wc -l")
+```
+
+This determines the number of files in the BUSDATA directory. There are 98973 files. 
+
+**Q4: Extracting file sizes, and plot a histogram**
+
+To extract the file sizes, we first get a long listing of the files in the directory, and further pipe the result to awk to extract the fifth field which is written to a text file, named sizes.txt.
+
+```{r, engine = 'bash', eval = FALSE}
+ls -l /course/AT/BUSDATA/ | awk -e '{print($5)}' > sizes.txt
+
+head sizes.txt
+```
+
+343
+
+345
+
+345
+
+345
+
+436
+
+437
+
+438
+
+531
+
+438
+
+In R, we can plot a histogram of the file sizes:
+```{r histogram of sizes}
+size = read.table("sizes.txt")
+hist(size$V1, main = "Histogram of sizes", xlab = "sizes")
+```
+
+**Q4: Plot File Size against Date/Time**
+
+To extract the file sizes and Date/Time, we use awk to extract the fifth and ninth fields and redirect the result to a text file, named sizes_times.txt. In addition, we use backslash to escape double quotes. 
+
+```{r, engine = 'bash', eval = FALSE}
+ls -l /course/AT/BUSDATA | awk -e '{print($5\" \"$9)}' > sizes_times.txt
+```
+
+In R, we read the sizes_times.txt file, and we extract the date and time from the file name, then convert the character to calendar dates and times. At last, we plot the date time against the file sizes.
+
+```{r histogram of size against date time}
+size.time = read.table("sizes_times.txt",header=FALSE, 
+                       stringsAsFactors=FALSE)
+colnames(size.time) = c("size", "date")
+
+head(size.time)
+# convert character to date time
+datetime =  strptime(gsub("[^[:digit:]]", "", size.time$date),
+                     "%Y%m%d%H%M%S")
+size.time$date = as.Date(datetime)
+size.time$time = strftime(datetime, format="%H:%M:%S")
+
+head(size.time)
+
+size.time.bydate = aggregate(size.time$size, 
+                             by = list(date = size.time$date), sum)
+
+plot(size.time.bydate$date, size.time.bydate$x, 
+     xlab = "Date", ylab = "Size", 
+     main = "File Sizes against Date", xaxt="n")
+
+axis.Date(1, at=seq(min(size.time.bydate$date), 
+                    max(size.time.bydate$date), 
+                    by="weeks"), format="%m-%d", las = 2)
+```
+
+**Q5: Extracting trips made by vehicle 6215 on the 1st April 2017**
+
+To get the trips from bus vehicle 6215 on the 1st of April, we used grep to search through all the files that match this condition, and write the results to a csv file, named bus-6215-2017-04-01.csv. 
+
+```{r, engine = 'bash', eval = FALSE}
+grep -h ,6215, /course/AT/BUSDATA/trip_updates_20170401* > bus-6215-2017-04-01.csv
+```
+
+To check our results, we have counted the lines in this file.
+
+```{r, engine = 'bash', eval = FALSE}
+wc bus-6215-2017-04-01.csv
+```
+
+504   504 46024 bus-6215-2017-04-01.csv
+
+In R, we read this file and processe it to plot the arrival and departure delays by stop sequence for vehicle 6215. For now, we have removed all duplicate observations in order to plot this.
+
+```{r read txt file}
+# read data in
+bus = read.csv("bus-6215-2017-04-01.csv", header = FALSE, 
+               sep = ",", stringsAsFactors = FALSE)
+
+# rename columns
+colnames(bus) = c("trip", "route", "vehicle", "departure", 
+                  "arrival", "stop_sequence", "stop_id", "timestamp")
+
+# remove duplicates
+uniquebus = bus[!duplicated(bus), ]
+```
+
+To plot, we have set up an empty plot to plot stop sequences with respect to its arrival or departure delay time. We set xaxt = n to remove numbering on x axis, and set ann = FALSE to suppress default title and axis labels.
+
+Then, we first overlay the plot with a transparent plot, and add legend on the plot with bty = n to remove the box around the legend.
+
+```{r plot delay}
+plot(uniquebus$arrival, pch = "", xaxt='n', ann = FALSE)
+text(uniquebus$arrival, labels = uniquebus$stop_sequence, col = "blue")
+points(uniquebus$departure, pch = "")
+text(uniquebus$departure, labels = uniquebus$stop_sequence, col = "green")
+
+# add legend
+opar = par(no.readonly = TRUE)
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = 'n', bty = 'n', xaxt = 'n', yaxt = 'n')
+
+legend("top", bty = "n", c("arrival", "departure"), text.col=c("blue", "green"))
+par(opar)
+```
+
+
+**Q6: Determining the average arrival, departure and timestamps for vehicle 6215**
+
+To count the number of consecutively repeated values, we have used rle() that are matched to the data frame. We store the trip and route information.
+
+```{r consecutive trips}
+busCons = rle(bus$trip)
+tripInfo = bus[match(busCons$values, bus$trip), ]
+tripInfo = tripInfo[ , 1:2]
+```
+
+Now, we add tripNum to each of the rows in the data frame, and use aggregate to calculate the mean of arrival, departure, and timestamp for each tripNum. Finally, we use cbind to bind the above trip, route data frame and the trip mean data frame.
+
+```{r calculate mean}
+bus$tripNum = rep(1:length(busCons$values), busCons$lengths)
+
+uniquebus = bus[!duplicated(bus), ]
+
+tripmean = aggregate(uniquebus[c("arrival", "departure", "timestamp")], 
+                     by = list(tripNum = uniquebus$tripNum), 
+                     mean, na.rm = TRUE)
+
+trip = cbind(tripInfo, tripmean)
+trip
+```
+
+We also execute our R script in Linux using Rscript with knitr library, and the output is a Lab2.md file.
+
+```{r, engine = 'bash', eval = FALSE}
+Rscript -e "library(knitr); knit('Lab2.Rmd')"
+```
+
+Then, we use pandoc to convert the markdown file to a html file.
+
+```{r, engine = 'bash', eval = FALSE}
+pandoc -t html -o Lab2.html Lab2.md
+```
+
+**Q7: Scalability to monitoring other bus vehicles on different days**
+
+To scale up the previous question to cover more buses and more days, one possible approach is to write a shell script with two arguments: vehicle id and date. For example, a script named grepbus.sh, and to grep the information, just execute: grepbus.sh 6215 20170401. The output of this script is a csv file which name is like bus-6215-2017-04-01.csv. Similarly, for the R part, we can also write a function to read the csv, and extract the data we need in a data frame, then do calculation and plot using the data frame.
+
+The difficulties we might encounter: 
+1) We need to check whether the vehicle id is valid. 
+2) Also, we might need to write some code to handle the date format. 
+3) When plot the points of arrival and departure, we might need to rescale the y axis according to the value in each csv file.

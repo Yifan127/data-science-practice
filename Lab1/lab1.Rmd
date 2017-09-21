@@ -1,0 +1,184 @@
+---
+title: "Web Scraping"
+author: "Yifan Zhang, ID: 4947058"
+date: "2017-8-6"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = 'D:/UoA/STATS769/Lab/Lab1/data')
+```
+
+## Qestion 1. 
+
+### Part i : Downloading data source
+
+First of all, we get the date of all the Saturdays from 2017-01-07 to 2017-07-29, then use `sprintf` to get the `urls`.
+
+```{r get saturdays}
+startdate = as.Date("2017-01-07")
+enddate = as.Date("2017-07-29")
+saturdays = seq(startdate, enddate, by="weeks")
+ 
+urls = sprintf("http://www.billboard.com/charts/hot-100/%s", saturdays)
+```
+
+
+To download the data, we use 'htmlParse' in XML package, it parses the html file to an R object 'XMLInternalDocument'. After that, we use 'getNodeSet' to find all the article nodes by its xpath. The xpath '//article[contains(@class, 'chart-row')]' matches all the <article> elements with a class attribute that contains chart-row.
+
+```{r get articleNodes}
+library(XML)
+docs = lapply(urls, htmlParse) 
+articleNodes = lapply(docs, getNodeSet, path = "//article[contains(@class, 'chart-row')]")
+```
+
+
+### Part ii: Processing data to a data frame
+
+We define a function `fromXMLToDF` which is used to convert xml to data frame. There is only one argument in this function called `articleNode`. In this function, we extract rank, song and artists within an article node by their xpath. Particularly, the artist element is either an `<a>` or a `<h3>` element, and also we use `trimws` to remove all the whitespace in artist, including `[ \t\r\n]`. The output of this function is a data frame which contains the rank, song and artist.
+
+```{r fromXMLTODF}
+fromXMLToDF = function(articleNode){
+  ranks = sapply(articleNode, xpathSApply, 
+                 ".//span[@class = 'chart-row__current-week']", xmlValue)
+  songs = sapply(articleNode, xpathSApply, 
+                 ".//h2", xmlValue)
+  artists = sapply(articleNode, xpathApply,
+                   ".//a[@class = 'chart-row__artist'] | .//h3[@class = 'chart-row__artist']",
+                   xmlValue)
+  artists = trimws(artists)
+  
+  df = data.frame(rank = as.integer(ranks), song = songs, artist= artists, 
+                  stringsAsFactors = FALSE)
+}
+```
+
+
+We apply the function `fromXMLToDF` to all the article nodes, and get a list which contains 30 elements, and each element is a data frame. Finally, we convert the list to a data frame, and add the date column to the data frame.
+
+```{r}
+# convert list to data frame
+articles = lapply(articleNodes, fromXMLToDF)
+billboard = do.call(rbind, articles)
+
+# add date column to data frame
+billboard = cbind(date = rep(saturdays, each = 100), billboard)
+
+dim(billboard)
+head(billboard)
+```
+
+
+We can now calculate the average rank for each artist, and order them by the average rank.
+
+```{r best artists}
+options(digits = 2)
+bestArtist = setNames(aggregate(billboard$rank, 
+                                 by = list(billboard$artist), mean), 
+                       c("artist", "rank"))
+head(bestArtist[order(bestArtist$rank), ])
+```
+
+
+## Question 2.
+### Part i: Download data source
+
+First, we use the variable i as a counter, and call the GTFS real-time trip updates API with header `"Ocp-Apim-Subscription-Key"`. If the response code is 200, then we save the content of the response to local as a json file and add 1 to the counter. After that, we wait 1 minute and repeat the above steps until we get 60 json files.
+
+```{r downloading real-time trips}
+library(httr)
+library(jsonlite)
+
+```
+
+
+### Part ii. Processing data source to a data frame
+
+Reading all the downloaded json files into R.  
+
+```{r}
+# converts json data to a list
+jsonfiles = list.files(pattern = "*.json")
+docs = lapply(jsonfiles, fromJSON)
+i = 1
+while(i <= 60)
+{
+  json.result = GET("https://api.at.govt.nz/v2/public/realtime/tripupdates", 
+                add_headers("Ocp-Apim-Subscription-Key"="bcd15874421546f4952fbf146e66257b"))
+  if(json.result$status_code == 200){
+    filenames = paste("realtimetrips_", format(Sys.time(), format="%Y%m%d-%H%M%S"), ".json", sep = "")
+    writeLines(content(json.result, as = "text", encoding = "UTF-8"), filenames)
+    print(i)
+    i = i + 1
+  }
+  Sys.sleep(60)
+}
+```
+
+
+To extract the real time trips information to a data frame, we initialize an empty list to store the data frames. In the for loop, we turn the nested data frame to a normal one, and extract trip, route, vehicle, arrival, departure, stop_sequence, stop_id, and timestamp within entity, then save all the information to a data frame, and set the data frame to the initialized list orderly. At the last, we convert the list to data frame.
+
+```{r extract json}
+# initalizes an empty list to store the data
+trips = vector("list", length(docs))
+
+# extracts trip, route, vehicle, arrival departure, stop_sequence, stop_id and timestamp under entity
+for(i in 1:length(docs)){
+  entity = flatten(docs[[i]]$response$entity)
+  trips[[i]] = data.frame(trip = entity$trip_update.trip.trip_id,
+                          route = entity$trip_update.trip.route_id, 
+                          vehicle = entity$trip_update.vehicle.id, 
+                          arrival = entity$trip_update.stop_time_update.arrival.delay,
+                          departure = entity$trip_update.stop_time_update.departure.delay, 
+                          stop_sequence = entity$trip_update.stop_time_update.stop_sequence, 
+                          stop_id = entity$trip_update.stop_time_update.stop_id, 
+                          timestamp = entity$trip_update.timestamp, 
+                          stringsAsFactors = FALSE)
+}
+
+# converts list to data frame
+trips = do.call(rbind, trips)
+
+head(trips)
+dim(trips)
+```
+
+
+In the following code, we read the two supplementary files into R, and truncate the trip and route identifiers in all of the three data frames. then merge them together.
+
+```{r}
+# reads agency and routes merges with route.txt and agency.txt
+agency = read.table("agency.txt", header = TRUE, sep = ",", 
+                    stringsAsFactors = FALSE)
+routes = read.table("routes.txt", header = TRUE, sep = ",", 
+                    stringsAsFactors = FALSE)
+
+# truncates route, trip
+routes$route_id = gsub("-.*", "", routes$route_id)
+trips$trip = gsub("-.*", "", trips$trip)
+trips$route = gsub("-.*", "", trips$route)
+
+# merges trips, routes and agency
+tripsplus = merge(trips, routes, by.x = "route", 
+                  by.y = "route_id", all.x = TRUE)
+tripsplus = merge(tripsplus, agency, by = "agency_id", all.x = TRUE)
+```
+
+Now we can calculate the average arrival and departure delay by agency and plot them.
+
+```{r plot}
+library(lattice)
+# calculates average arrival and departure delay
+delayByAgency = aggregate(tripsplus[c("departure","arrival")], 
+                          by = list(agency = tripsplus$agency_name), 
+                          mean, na.rm = TRUE)
+delayByAgency
+
+# plot
+mat <- as.matrix(delayByAgency[-1])
+rownames(mat) <- delayByAgency$agency
+dotplot(mat, pch = 16, cex = 1.5, auto.key = TRUE)
+```

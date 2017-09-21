@@ -1,0 +1,181 @@
+---
+title: "Data Tech Review"
+author: "Yifan Zhang ID:4947058"
+date: "2017-7-28"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = 'D:/UoA/STATS769/Lab/Lab0/data-tech-review-data/Files')
+```
+
+
+## Step 1: Loads the 60 csv files to a data frame
+
+* Gets all the csv file names in my current working directory.
+* Reads them to a list by applying read.csv function to all of them.
+* Call rbind function to combine the list by rows, and obtains a data frame.
+
+```{r}
+myfiles = list.files(pattern = "*.csv")
+trips = do.call(rbind, lapply(myfiles, read.csv, header = TRUE, stringsAsFactors = FALSE))
+dim(trips)
+head(trips)
+```
+
+
+## Step 2: Summary of departure and arrival delay
+
+* Summary function provides minimum, 1st quantile, median, mean, 3rd quantile, maximum and the number of NA.
+
+```{r}
+summary(trips[c("arrival", "departure")])
+```
+
+* Plots a histogram of departure.
+
+```{r message = FALSE, warning = FALSE}
+library(ggplot2)
+```
+
+```{r warning = FALSE}
+ggplot(trips, aes(departure)) + geom_histogram(binwidth = 20)
+```
+
+* Plots a histogram of arrival.
+
+```{r arrival, warning = FALSE}
+ggplot(trips, aes(arrival)) + geom_histogram(binwidth = 30)
+```
+
+
+## Step 3: Defines a function to truncate the trip, route, and route_id
+
+* Splits the character by the default separator "-".
+* Extracts the first component of the list.
+
+```{r}
+truncId = function(x, sep = "-", index = 1){
+  sapply(strsplit(x, sep), "[", index)
+}
+```
+
+
+## Step 4: Truncates the trip and route
+
+* Truncates trip and route in data frame trips.
+* Add the truncated trip and route to the data frame, and remove the original ones with version tag.
+
+```{r}
+trip = truncId(trips$trip)
+route = truncId(trips$route)
+trips = cbind(trip, route, trips[-c(1, 2)])
+head(trips)
+```
+
+
+## Step 5: Reads route and agency files, and truncates route_id
+
+* Loads agency.txt and routes.txt to R.
+* Truncates the route_id.
+
+```{r}
+agency = read.table("agency.txt", header = TRUE, sep = ",")
+routes = read.table("routes.txt", header = TRUE, sep = ",", stringsAsFactors = FALSE)
+routes$route_id = truncId(routes$route_id)
+```
+
+## Step 6: Merges trips, route and agency
+
+* Merges trips and routes by column "route" in trips and column "route_id" in routes.
+* Merges trips and agency by column "agency_id"
+* Obtains a merged data frame named tripsplus
+
+```{r merge}
+tripsplus = merge(trips, routes, by.x = "route", by.y = "route_id", all.x = TRUE)
+tripsplus = merge(tripsplus, agency, by = "agency_id", all.x = TRUE)
+head(tripsplus)
+```
+
+## Step 7: Calculates average departure and arrival by agency
+
+* Aggregates departure and arrival by agency_id
+* Applys mean function to get the average values
+
+```{r}
+mean.agency = aggregate(tripsplus[c("departure","arrival")], by = list(agency_id = tripsplus$agency_id), mean, na.rm = TRUE)
+mean.agency
+```
+
+
+## Step 8: Plots a point chart
+
+* Reshaps the data frame mean.agency
+
+```{r message = FALSE, warning = FALSE}
+library(reshape2)
+```
+
+```{r}
+meltmean = melt(mean.agency, id = "agency_id")
+head(meltmean)
+```
+
+* Plots a point chart to show the average departure and arrival by each agency.
+* The chart indicates that 1) Birkenhead Transport (BTL) has the largest departure and arrival delays, 2) Eastern (HE) and Go Bus (GBT) have a very small departure delay, 3) Eastern (HE) has the smallest arrival delay.
+
+```{r}
+pp = function(df, title){
+  ggplot(df, aes(agency_id, value, colour = variable, group = variable)) +
+    geom_point(size = 4) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = 0) +
+    ggtitle(title) + 
+    labs(x = "Agency ID", y = "Time", colour = "Delay")
+}
+
+pp(meltmean, title = "Average Departure and Arrival Delays by Agency")
+```
+
+
+## Step 9: Removes duplicated observations
+
+* Removes all duplicated observations in tripsplus
+* Check the number of duplicated observations
+
+```{r duplicated}
+unique.tripsplus = tripsplus[!duplicated(tripsplus),]
+dim(tripsplus)
+dim(unique.tripsplus)
+table(duplicated(tripsplus))
+```
+
+## Step 10: The impact of duplication
+
+* Calculates average departure and arrival by agency after removing duplicated observations
+
+```{r}
+mean.agency.unique = aggregate(unique.tripsplus[c("departure","arrival")], by = list(agency_id = unique.tripsplus$agency_id), mean, na.rm = TRUE)
+mean.agency.unique
+```
+
+* Calculates the difference between the orignal data and the data without duplication
+
+```{r}
+departure.diff = mean.agency$departure - mean.agency.unique$departure
+arrival.diff = mean.agency$arrival - mean.agency.unique$arrival
+mean.agency.diff = data.frame(agency_id=mean.agency$agency_id, departure.diff, arrival.diff)
+mean.agency.diff
+```
+
+## Step 11: Plots a chart of the impact  
+
+* The chart indicates that 1) The duplications have little impact on the average departure and arrival delays of Birkenhead Transport (BTL) and Howick and Eastern (HE), 2) The average values of SkyBus (ABEXP) is the most affected by the duplication.
+
+```{r}
+meltmean.diff = melt(mean.agency.diff, id = "agency_id")
+pp(meltmean.diff, title = "Impact of Duplication")
+```

@@ -1,0 +1,266 @@
+---
+title: "Large data"
+author: "Yifan Zhang (4947058)"
+date: "8/24/2017"
+output: html_document
+---
+
+```{r setup}
+library(data.table) # For Qs3
+library(RSQLite) # For Qs4
+library(ggplot2)
+
+```
+
+# Introduction
+This is the report documenting the experiments of lab 3. 
+We will firstly explain how we implemented Question 1 to 4 and then demonstrate our experiment result. We put all comments, comparison and analysis at the last section `Experiments Analysis`. Additionally, we will also measure the time usage for each task.  
+
+# Question 1
+
+We will examine two approaches towards estimating the file size of a dataset. The first approach produces a fast estimate, while the second approach requires more calculation but will be closer to the actual file size. Both approaches assume the complexity and structure of the lines in the dataset remain consistent. 
+
+For the first method, we will find the size of a subset of the dataset and then scale up the result to make an estimate. Hence we found the size of the first 1000 rows and the total number of lines in the of the AT Bus dataset to calculate our first estimate of around 1384MB.
+
+```{r 1}
+csvfile = "/course/AT/alldata.csv"
+atpart = read.csv(csvfile, nrow = 1000)
+partsize = object.size(atpart)
+# Number of lines in the complete file
+nline = as.integer(system("wc -l /course/AT/alldata.csv | awk -e '{print($1)}'",
+                           intern = TRUE))
+#nline = as.integer(system(paste("wc -l", csvfile, "| awk -e '{print($1)}", sep = " "),
+ #                          intern = TRUE))
+estimate1 = partsize*nline/1000
+print(partsize*nline/1000, units = "Mb")
+```
+
+Our second approach examines the types of variables in the dataset to take into account the different memory demands of numeric and character vectors. 
+We know the AT Bus data consists of three factor variables and five integer variables. From previous analysis we know the trip, route and vehicle identification details each have a certain format and hence are of fixed length. Furthermore we know the trip and route details contain an identification number as well as a "version tag" that is related to the date of the journey. Hence, aside from duplicates, we expect the trip id to be unique except for updates of the same trip and the route id to be only shared by journeys on the same route, on the same day. We also know the volume of bus journeys varies depending on the time of day and day of week, so the accuracy of our first estimate depends largely on how representative the first 1000 rows of data is of the volume of bus trips recorded during the time period described by the complete dataset. We know consecutive rows are status updates separated by 1 minute intervals hence our sample will not be random or representative. Consequently if the first 1000 rows of data relate to status updates made during a high bus volume period then we would expect an over-estimate since there would be more unique strings for the factor variables than in general.
+
+```{r 2}
+# Type of vectors
+sapply(atpart, class)
+table(sapply(atpart, class))
+# Examine a few observations from our sample
+head(atpart)
+```
+
+For our second approach the amount of memory required for the integer and character variables will be estimated separately. The size of a character vector is more complicated since it is dependent on both its length, as well as the number of unique strings and their associated character lengths (i.e. the cache size). Consequently our second estimate will be the sum of four components, estimates for the size of the: 1) overhead, 2) integer vectors, 3) character vectors, and 4) cache size.
+
+Each of the eight vectors in the AT bus dataset, regardless of type, will have an overhead of around 40 bytes. We know integer and character values require 4 and 8 bytes respectively. Hence to estimate the size of the integer and character vectors we combined this information with the number lines in the complete dataset and the number variables of each type. The resulting products are shown below as the first three terms in our calculation for the second estimate.
+
+To estimate the cache size we used the sample of 1000 rows to estimate the number of levels in each of the factors. As previously mentioned, we know that the strings of each factor are of fixed lengths. Hence obtaining the character length of the first level will be sufficient for determining the lengths of all unique levels. 
+
+```{r}
+CacheSize = function(x) {
+  lev = levels(x)
+  # We know all levels are the same length
+  cache.size = length(lev)*nchar(lev[1]) 
+}
+Cache = do.call(rbind.data.frame, lapply(atpart[, 1:3], CacheSize))
+estimate2 = 8*40 + 5*4*nline + 3*8*nline + sum(Cache)
+paste(as.numeric(estimate2), "Mb")
+```
+# Question 2 
+Following variables will store the memory usage for use in a later plot. 
+```{r}
+size_used = double(7) 
+size_max = double(7)
+```
+We firstly show the memory at the start. 
+```{r}
+gc(reset = T) # Memory at the start of Q2
+```
+Load the full csv and measure the memory.
+```{r}
+# 2a). Load data using read.csv
+csvfile = "/course/AT/alldata.csv"
+system.time(bus <- read.csv(csvfile))
+df_a = gc()
+size_used[1] = df_a[4] # this will be used for the later plot
+size_max[1] = df_a[12]
+df_a
+```
+We compute the size of the actual loaded dataframe. The actual size of the data frame is lower than our estimation. We will discuss this further in Question 3.
+```{r}
+df_size = as.numeric(object.size(bus)/(1024^2))
+print(object.size(bus), units = "Mb")
+```
+We added a new column to the data fame and measured the memory. The UNIX timestamps from the AT Bus data were then converted to R date objects to determine the day of week that the status requests were made. The results are shown below. 
+```{r}
+# 2b). Create new variable in traditional data frame object
+g = gc(reset = T) # store it in a dummy variable to avoid printing results
+system.time(bus$wday <- as.POSIXlt(bus$timestamp, origin = "1970-01-01", 
+                       tz = "Pacific/Auckland")$wday)
+df_b = gc()
+size_used[2] = df_b[4]
+size_max[2] = df_b[12]
+df_b
+```
+We aggregated the data by the week day. The memory and time usage are shown below. 
+```{r}
+# 2c). Summary using aggregate function
+g = gc(reset = T)
+ptm = proc.time()
+aggregate(bus[c("arrival", "departure")], 
+                       by = list(wday = bus$wday), 
+                       mean, na.rm = TRUE)
+proc.time() - ptm
+df_c = gc()
+size_used[3] = df_c[4]
+size_max[3] = df_c[12]
+gc()
+```
+We know from previous analysis that the AT Bus data contains duplicates. Hence the following summary of average delay across the week may be more appropriate. We can see that removing the duplicates in R can take a bit of processing time.
+
+```{r}
+# 2c). Summary with duplicates removed.
+g = gc(reset = T)
+ptm = proc.time()
+unique.bus = bus[!duplicated(bus), ]
+aggregate(unique.bus[c("arrival", "departure")], 
+          by = list(wday = unique.bus$wday), 
+          mean, na.rm = TRUE)
+proc.time() - ptm
+rm(unique.bus) # clean all variables
+rm(bus)
+```
+
+
+
+# Question 3
+
+```{r}
+# Memory at the start of Q3
+gc(reset = T) # Memory use at the start 
+```
+
+```{r echo = FALSE}
+# 3a). Load data using data.table
+csvfile = "/course/AT/alldata.csv"
+system.time(busDT <- fread(csvfile, sep = ","))
+```
+
+```{r}
+dt_a = gc()
+dt_a
+size_used[4] = dt_a[4]
+size_max[4] = dt_a[12]
+DT_size = as.numeric(object.size(busDT)/(1024^2))
+print(object.size(busDT), units = "Mb")
+```
+
+In comparison to our estimates from Question 1 we can see that the actual file sizes in both formats are below the two estimates. As anticipated, the first estimate was less accurate since it was a "ball-park" estimate. In general, we would prefer our estimates to be over-estimates rather than under, so that we do not exceed the RAM limitations of our operating system and hardware.
+
+The UNIX timestamps are again converted to R date objects through references in `data.table` via the `:=` operator. We expect to save the memory usage during this executation.  
+```{r}
+# 3b). Create new variable in data.table object
+g = gc(reset = T)
+system.time(busDT[,wday := as.POSIXlt(busDT$timestamp, origin = "1970-01-01", 
+                         tz = "Pacific/Auckland")$wday])
+dt_b = gc()
+size_used[5] = dt_b[4]
+size_max[5] = dt_b[12]
+dt_b
+```
+
+
+Finally we aggregated the result of the data table and tracked the memory usage below. 
+```{r}
+# 3c). Summary using data.table commands
+g = gc(reset = T)
+ptm = proc.time()
+# Add new columns for mean delays across weekdays
+busDT[, .(avg_arr = mean(arrival, na.rm=TRUE), 
+          avg_dep = mean(departure, na.rm=TRUE)),
+      by=.(wday)]
+# View the aggregated results
+unique(busDT[, c("wday", "avg_arr", "avg_dep"), with=FALSE])
+proc.time() - ptm
+dt_c = gc()
+size_used[6] = dt_c[4]
+size_max[6] = dt_c[12]
+dt_c
+rm(busDT)
+```
+
+
+# Question 4
+
+This is the initialisation step. We load the library and build the connection to the database. We also have a look on the original memory cost at the start. This may be useful later if we want to compare the memory change over the execution. 
+```{r eval}
+gc(reset = T)
+con = dbConnect(SQLite(), "/course/AT/alldata.sqlite")
+```
+There is no need to load any CSV file and so there is no step 1 compared with previous questions. 
+The following code is for the potential step 2. We use SQL `alter` and `update` to add a column day_of_week and set values to the new column directly in the database. We only provide a solution but we don't run it in this lab because we are not allowed to make change on the database. 
+
+```{r eval = FALSE}
+dbSendQuery(con, "alter table buses add wday int")
+dbSendQuery(con, "update buses set wday = strftime('%w', timestamp, 'unixepoch', 'localtime')")
+```
+
+
+For step 3, we  run all operations in the database. We firstly use 'group by' to aggregate departure and arrival by the week of day generated by strftime function. 
+
+Finally, we apply 'merge' to combine these two data frames by day_of_week. 
+
+```{r}
+t = proc.time()
+arrival = dbGetQuery(con, "select strftime('%w', timestamp, 'unixepoch', 'localtime') as wday, avg(arrival) as departure from buses where arrival <> 'NA' group by strftime('%w', timestamp, 'unixepoch', 'localtime')")
+departure = dbGetQuery(con, "select strftime('%w', timestamp, 'unixepoch', 'localtime') as wday, avg(departure) as departure from buses where departure <> 'NA' group by strftime('%w', timestamp, 'unixepoch', 'localtime')")
+merged = merge(arrival, departure, by = "wday")
+merged
+```
+We don't see significant memory use for these steps but we experience a longer running time than both data frame and data table. We investigate it in a later section. 
+```{r}
+proc.time() - t
+sql_c = gc()
+size_used[7] = sql_c[4]
+size_max[7] = sql_c[12]
+sql_c
+
+dbDisconnect(con)
+```
+
+# Comparison
+
+## Discussion on Q2 and Q3
+In this section, we will analyse and compare the run time and memory usage of traditional `R` methods (e.g. `read.csv`, `aggregate`) alongside alternatives offered by the `data.table` package.
+
+First, we examine the run time and memory usage for reading in large data files into `R`. The maximum RAM used with `fread` is generally lower by around 1500MB. However, soring the data as a `data.table` object requires a few hundred more megabytes of RAM. In terms of the time, our observation shows an eightfold reduction in run time when using `fread` in the `data.table` package, rather than the conventional `read.csv` function to read in the AT Bus data. Based on our research, data.table read files without converting among factors, integers and characters. It just read everything as characters. It makes it read fast. It also may explain its higher memory usage because characters may take more space than plain integers or factors. 
+
+Secondly, we can see the amount of time, memory used and maximum RAM reached when creating the day of week variable was approximately the same in both situations. 
+
+Lastly, we compare the use of the conventional `aggregate` function to summarise data, with equivalent methods in `data.table`. The processing time required to find the average arrival and departure delay times for each day of the week was much faster using `data.table` and its maximum memory used is also lower. However, performing the aggregate summary creates two additional variables in the `data.table` object which uses almost another 500MB of memory. In comparison the results from the `aggregate` function uses only around 1KB.
+
+## Discussion on Q4
+To investigate why the database approach experiences a low memory cost but high time cost, we run an experiment on the disk operation on our own machine. With the same dataset, we found that `group by` operation of SQLite takes about 60 MB/sec reading rate, but the `aggregate` in R does not use disk that much (only a few KB per seconds). Since the the disk IO is longer than memory, so the time of using RSQLite should be longer. Also, it explains the low memory cost because RSQLite operates directly on disk without using much memory. We can conclude that there can be a trade-off between time and memory. RSQLite is suitable when memory is more precious than time. 
+
+## Bar Plot for memory usage
+
+```{r barplot}
+method = rep(c("dataframe", "datatable", "SQLite"), c(3, 3, 1))
+step = c(rep(c("Load File", "Add Column", "Aggregate"), 2), "Aggregate")
+plot_mem = function(df, title){
+  ggplot(data = df, aes(x = step, y = size, fill = method)) +
+  geom_bar(stat = "identity", width = 1, position = position_dodge()) +
+  scale_fill_brewer(palette = "Paired") +
+  labs(title = title, 
+       x="Method", y = "Memory Size Used (MB)") +
+  theme_minimal()
+}
+
+df_used = data.frame(method = method, step = step, size = size_used)
+df_used$step = factor(df_used$step, levels = c("Load File", "Add Column", "Aggregate"))
+plot_mem(df_used, "Used Memory Comparision")
+
+df_max = data.frame(method = method, step = step, size = size_max)
+df_max$step = factor(df_max$step, levels = c("Load File", "Add Column", "Aggregate"))
+plot_mem(df_max, "Max Memory Comparision")
+
+```
+
+
+
